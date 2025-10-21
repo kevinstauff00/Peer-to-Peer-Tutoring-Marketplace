@@ -11,12 +11,15 @@
 (define-constant ERR-NOT-ACTIVE u110)
 (define-constant ERR-CANCEL-BLOCKED u111)
 (define-constant ERR-TRANSFER-FAILED u199)
+(define-constant ERR-INVALID-RATING u200)
+(define-constant ERR-ALREADY-RATED u201)
+(define-constant ERR-SESSION-NOT-COMPLETED u202)
 (define-constant STATUS-FUNDED u1)
 (define-constant STATUS-COMPLETED u2)
 (define-constant STATUS-PAID u3)
 (define-constant STATUS-CANCELLED u4)
 (define-data-var next-id uint u1)
-(define-map tutors (tuple (who principal)) (tuple (rate uint) (active bool) (sessions uint) (earned uint)))
+(define-map tutors (tuple (who principal)) (tuple (rate uint) (active bool) (sessions uint) (earned uint) (total-rating uint) (review-count uint)))
 (define-map sessions
   (tuple (id uint))
   (tuple
@@ -34,11 +37,22 @@
     (learner-approved bool)
   )
 )
+(define-map reviews
+  (tuple (session-id uint))
+  (tuple
+    (rating uint)
+    (review (string-ascii 256))
+    (reviewer principal)
+    (tutor principal)
+    (created-at uint)
+  )
+)
 (define-read-only (contract-principal) (as-contract tx-sender))
 (define-read-only (is-tutor? (who principal)) (is-some (map-get? tutors { who: who })))
 (define-read-only (get-next-id) (var-get next-id))
 (define-read-only (get-tutor (who principal)) (map-get? tutors { who: who }))
 (define-read-only (get-session (id uint)) (map-get? sessions { id: id }))
+(define-read-only (get-review (session-id uint)) (map-get? reviews { session-id: session-id }))
 (define-read-only (session-active? (id uint))
   (let ((s (map-get? sessions { id: id })))
     (match s
@@ -53,7 +67,7 @@
       (if (is-some (map-get? tutors { who: tx-sender }))
           (err ERR-ALREADY-REGISTERED)
           (begin
-            (map-set tutors { who: tx-sender } { rate: rate, active: true, sessions: u0, earned: u0 })
+            (map-set tutors { who: tx-sender } { rate: rate, active: true, sessions: u0, earned: u0, total-rating: u0, review-count: u0 })
             (ok true)
           )
       )
@@ -68,7 +82,7 @@
             (if (<= rate u0)
                 (err ERR-INVALID-PRICE)
                 (begin
-                  (map-set tutors { who: tx-sender } { rate: rate, active: true, sessions: (get sessions tutor-data), earned: (get earned tutor-data) })
+                  (map-set tutors { who: tx-sender } { rate: rate, active: true, sessions: (get sessions tutor-data), earned: (get earned tutor-data), total-rating: (get total-rating tutor-data), review-count: (get review-count tutor-data) })
                   (ok true)
                 )
             )
@@ -82,7 +96,7 @@
     (match t
       tutor-data
         (begin
-          (map-set tutors { who: tx-sender } { rate: (get rate tutor-data), active: false, sessions: (get sessions tutor-data), earned: (get earned tutor-data) })
+          (map-set tutors { who: tx-sender } { rate: (get rate tutor-data), active: false, sessions: (get sessions tutor-data), earned: (get earned tutor-data), total-rating: (get total-rating tutor-data), review-count: (get review-count tutor-data) })
           (ok true)
         )
       (err ERR-NOT-REGISTERED)
@@ -94,7 +108,7 @@
     (match t
       tutor-data
         (begin
-          (map-set tutors { who: tx-sender } { rate: (get rate tutor-data), active: true, sessions: (get sessions tutor-data), earned: (get earned tutor-data) })
+          (map-set tutors { who: tx-sender } { rate: (get rate tutor-data), active: true, sessions: (get sessions tutor-data), earned: (get earned tutor-data), total-rating: (get total-rating tutor-data), review-count: (get review-count tutor-data) })
           (ok true)
         )
       (err ERR-NOT-REGISTERED)
@@ -219,7 +233,7 @@
                                             learner-approved: true
                                           }
                                         )
-                                        (map-set tutors { who: t } { rate: (get rate tdata), active: (get active tdata), sessions: (+ (get sessions tdata) u1), earned: (+ (get earned tdata) amt) })
+                                        (map-set tutors { who: t } { rate: (get rate tdata), active: (get active tdata), sessions: (+ (get sessions tdata) u1), earned: (+ (get earned tdata) amt), total-rating: (get total-rating tdata), review-count: (get review-count tdata) })
                                         (ok true)
                                       )
                                     (err ERR-NOT-REGISTERED)
@@ -295,8 +309,56 @@
 (define-read-only (tutor-stats (who principal))
   (let ((t (map-get? tutors { who: who })))
     (match t
-      tutor-data (some (tuple (rate (get rate tutor-data)) (active (get active tutor-data)) (sessions (get sessions tutor-data)) (earned (get earned tutor-data))))
+      tutor-data (some (tuple (rate (get rate tutor-data)) (active (get active tutor-data)) (sessions (get sessions tutor-data)) (earned (get earned tutor-data)) (average-rating (if (> (get review-count tutor-data) u0) (/ (get total-rating tutor-data) (get review-count tutor-data)) u0)) (review-count (get review-count tutor-data))))
       none
+    )
+  )
+)
+(define-public (submit-review (session-id uint) (rating uint) (review-text (string-ascii 256)))
+  (let ((s (map-get? sessions { id: session-id })))
+    (match s
+      sess
+        (if (not (is-eq (get learner sess) tx-sender))
+            (err ERR-NOT-LEARNER)
+            (if (not (is-eq (get status sess) STATUS-PAID))
+                (err ERR-SESSION-NOT-COMPLETED)
+                (if (or (< rating u1) (> rating u5))
+                    (err ERR-INVALID-RATING)
+                    (if (is-some (map-get? reviews { session-id: session-id }))
+                        (err ERR-ALREADY-RATED)
+                        (let ((tutor (get tutor sess)))
+                          (match (map-get? tutors { who: tutor })
+                            tdata
+                              (begin
+                                (map-set reviews { session-id: session-id }
+                                  {
+                                    rating: rating,
+                                    review: review-text,
+                                    reviewer: tx-sender,
+                                    tutor: tutor,
+                                    created-at: stacks-block-height
+                                  }
+                                )
+                                (map-set tutors { who: tutor }
+                                  {
+                                    rate: (get rate tdata),
+                                    active: (get active tdata),
+                                    sessions: (get sessions tdata),
+                                    earned: (get earned tdata),
+                                    total-rating: (+ (get total-rating tdata) rating),
+                                    review-count: (+ (get review-count tdata) u1)
+                                  }
+                                )
+                                (ok true)
+                              )
+                            (err ERR-NOT-REGISTERED)
+                          )
+                        )
+                    )
+                )
+            )
+        )
+      (err ERR-SESSION-NOT-FOUND)
     )
   )
 )
