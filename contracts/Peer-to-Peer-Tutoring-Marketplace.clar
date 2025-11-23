@@ -14,6 +14,8 @@
 (define-constant ERR-INVALID-RATING u200)
 (define-constant ERR-ALREADY-RATED u201)
 (define-constant ERR-SESSION-NOT-COMPLETED u202)
+(define-constant ERR-FORCE-APPROVE-EARLY u203)
+(define-constant FORCE-APPROVE-DELAY u144)
 (define-constant STATUS-FUNDED u1)
 (define-constant STATUS-COMPLETED u2)
 (define-constant STATUS-PAID u3)
@@ -353,6 +355,73 @@
                               )
                             (err ERR-NOT-REGISTERED)
                           )
+                        )
+                    )
+                )
+            )
+        )
+      (err ERR-SESSION-NOT-FOUND)
+    )
+  )
+)
+
+(define-public (force-approve-session (id uint))
+  (let ((s (map-get? sessions { id: id })))
+    (match s
+      sess
+        (if (is-eq (get status sess) STATUS-CANCELLED)
+            (err ERR-ALREADY-CANCELLED)
+            (if (not (is-eq (get tutor sess) tx-sender))
+                (err ERR-NOT-TUTOR)
+                (if (not (is-eq (get status sess) STATUS-COMPLETED))
+                    (err ERR-NOT-ACTIVE)
+                    (if (get learner-approved sess)
+                        (err ERR-ALREADY-APPROVED)
+                        (match (get completed-at sess)
+                          completion-height
+                            (if (< stacks-block-height (+ completion-height FORCE-APPROVE-DELAY))
+                                (err ERR-FORCE-APPROVE-EARLY)
+                                (let ((amt (get price sess)) (t (get tutor sess)))
+                                  (match (as-contract (stx-transfer? amt tx-sender t))
+                                    ok-pay
+                                      (match (map-get? tutors { who: t })
+                                        tdata
+                                          (begin
+                                            (map-set sessions { id: id }
+                                              {
+                                                learner: (get learner sess),
+                                                tutor: (get tutor sess),
+                                                subject: (get subject sess),
+                                                price: (get price sess),
+                                                created-at: (get created-at sess),
+                                                completed-at: (get completed-at sess),
+                                                approved-at: (some stacks-block-height),
+                                                cancelled-at: (get cancelled-at sess),
+                                                proof: (get proof sess),
+                                                status: STATUS-PAID,
+                                                tutor-completed: (get tutor-completed sess),
+                                                learner-approved: true
+                                              }
+                                            )
+                                            (map-set tutors { who: t }
+                                              {
+                                                rate: (get rate tdata),
+                                                active: (get active tdata),
+                                                sessions: (+ (get sessions tdata) u1),
+                                                earned: (+ (get earned tdata) amt),
+                                                total-rating: (get total-rating tdata),
+                                                review-count: (get review-count tdata)
+                                              }
+                                            )
+                                            (ok true)
+                                          )
+                                        (err ERR-NOT-REGISTERED)
+                                      )
+                                    err-code (err err-code)
+                                  )
+                                )
+                            )
+                          (err ERR-SESSION-NOT-COMPLETED)
                         )
                     )
                 )
